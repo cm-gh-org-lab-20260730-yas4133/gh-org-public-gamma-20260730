@@ -1,0 +1,34 @@
+name: GH-R29 organization variable consumer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Convert exact organization variable into canonical issue
+        uses: actions/github-script@v7
+        env:
+          CM_ORG_VAR: ${{ vars.CM_ORG_VAR_GAMMA_20260730 }}
+        with:
+          script: |
+            const value = process.env.CM_ORG_VAR || "";
+            const known = [
+              "OWNER_ORG_VAR_GAMMA_20260730",
+              "ATTACK_ORG_VAR_GAMMA_20260730",
+            ];
+            if (!known.includes(value)) {
+              core.setFailed("Unexpected organization variable value");
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `GH-R29 ${value}`,
+              body: "Owned organization-variable authorization canary.",
+            });
