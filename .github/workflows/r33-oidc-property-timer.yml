@@ -1,0 +1,62 @@
+name: GH-R33 OIDC property timer finalization control
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+jobs:
+  mint-after-timer:
+    runs-on: ubuntu-latest
+    environment: r33-oidc-timer
+    steps:
+      - name: Mint token and publish selected non-secret claims
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          response="$(
+            curl --fail --silent --show-error \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=gh-r33-owned-control"
+          )"
+          jwt="$(jq -er '.value' <<<"${response}")"
+          python3 - "${jwt}" <<'PY' > claims.json
+          import base64
+          import json
+          import sys
+
+          payload = sys.argv[1].split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+          selected = {
+              "aud": claims.get("aud"),
+              "sub": claims.get("sub"),
+              "repository": claims.get("repository"),
+              "repository_id": claims.get("repository_id"),
+              "repository_owner": claims.get("repository_owner"),
+              "repository_owner_id": claims.get("repository_owner_id"),
+              "repo_property_cm_owner_locked_20260730": claims.get(
+                  "repo_property_cm_owner_locked_20260730"
+              ),
+              "workflow_ref": claims.get("workflow_ref"),
+              "run_id": claims.get("run_id"),
+          }
+          print(json.dumps(selected, sort_keys=True))
+          PY
+          title="GH-R33 TIMER CLAIM $(jq -r '.repo_property_cm_owner_locked_20260730' claims.json)"
+          body="$(jq -c . claims.json)"
+          jq -n --arg title "${title}" --arg body "${body}" \
+            '{title: $title, body: $body}' |
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "https://api.github.com/repos/${GH_REPOSITORY}/issues" \
+              --data-binary @-
