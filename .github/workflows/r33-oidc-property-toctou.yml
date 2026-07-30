@@ -46,6 +46,14 @@ jobs:
               ),
               "workflow_ref": claims.get("workflow_ref"),
               "run_id": claims.get("run_id"),
+              "iat": claims.get("iat"),
+              "nbf": claims.get("nbf"),
+              "exp": claims.get("exp"),
+              "lifetime_seconds": (
+                  claims.get("exp") - claims.get("iat")
+                  if claims.get("exp") and claims.get("iat")
+                  else None
+              ),
           }
           print(json.dumps(selected, sort_keys=True))
           PY
