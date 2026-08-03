@@ -1,0 +1,18 @@
+name: Jules CI Fixer Boundary Control
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  externally-controlled-failure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Emit owned low-trust producer text and fail
+        run: |
+          curl -fsSL https://api.github.com/repos/cm-gh-org-lab-20260730-yas4133/gh-org-public-gamma-20260730/issues/12 | jq -r '.body'
+          exit 1
