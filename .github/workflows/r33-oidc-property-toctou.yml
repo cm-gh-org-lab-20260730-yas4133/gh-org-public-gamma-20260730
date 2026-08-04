@@ -1,4 +1,4 @@
-name: GH-R33 OIDC property finalization control
+name: GH-R33 AWS OIDC property finalization
 
 on:
   workflow_dispatch:
@@ -9,62 +9,133 @@ permissions:
   issues: write
 
 jobs:
-  mint-after-approval:
+  read-owned-cloud-canary:
     runs-on: ubuntu-latest
     environment: r33-oidc-gate
     steps:
-      - name: Mint token and publish selected non-secret claims
+      - name: Exchange GitHub OIDC token and read exact owned AWS canary
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPOSITORY: ${{ github.repository }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ROLE_ARN: arn:aws:iam::863421994440:role/gh-r33-stale-property-20260804
+          AWS_BUCKET: cm-gh-r33-863421994440-20260804
+          AWS_OBJECT_KEY: private/r33-owned-canary.txt
         run: |
           set -euo pipefail
-          response="$(
-            curl --fail --silent --show-error \
+          oidc_response="${RUNNER_TEMP}/gh-r33-oidc-response.json"
+          oidc_error="${RUNNER_TEMP}/gh-r33-oidc-error.txt"
+          oidc_status="$({
+            curl --silent --show-error \
+              --output "${oidc_response}" \
+              --write-out '%{http_code}' \
               -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=gh-r33-owned-control"
-          )"
-          jwt="$(jq -er '.value' <<<"${response}")"
-          python3 - "${jwt}" <<'PY' > claims.json
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com"
+          } 2>"${oidc_error}")"
+
+          oidc_result="failed"
+          sts_result="not_attempted"
+          s3_result="not_attempted"
+          canary=""
+          canary_sha256=""
+          caller_arn=""
+          selected_claims='{}'
+          error_text=""
+
+          if [[ "${oidc_status}" == "200" ]] && jq -e '.value | type == "string"' "${oidc_response}" >/dev/null; then
+            oidc_result="success"
+            jwt="$(jq -er '.value' "${oidc_response}")"
+            selected_claims="$(python3 - "${jwt}" <<'PY'
           import base64
           import json
           import sys
 
-          payload = sys.argv[1].split(".")[1]
-          payload += "=" * (-len(payload) % 4)
+          payload = sys.argv[1].split('.')[1]
+          payload += '=' * (-len(payload) % 4)
           claims = json.loads(base64.urlsafe_b64decode(payload))
-          selected = {
-              "aud": claims.get("aud"),
-              "sub": claims.get("sub"),
-              "repository": claims.get("repository"),
-              "repository_id": claims.get("repository_id"),
-              "repository_owner": claims.get("repository_owner"),
-              "repository_owner_id": claims.get("repository_owner_id"),
-              "repo_property_cm_owner_locked_20260730": claims.get(
-                  "repo_property_cm_owner_locked_20260730"
-              ),
-              "workflow_ref": claims.get("workflow_ref"),
-              "run_id": claims.get("run_id"),
-              "iat": claims.get("iat"),
-              "nbf": claims.get("nbf"),
-              "exp": claims.get("exp"),
-              "lifetime_seconds": (
-                  claims.get("exp") - claims.get("iat")
-                  if claims.get("exp") and claims.get("iat")
-                  else None
-              ),
-          }
-          print(json.dumps(selected, sort_keys=True))
+          keys = (
+              'aud', 'sub', 'repository', 'repository_id', 'repository_owner',
+              'repository_owner_id', 'repo_property_cm_owner_locked_20260730',
+              'workflow_ref', 'run_id', 'run_attempt', 'actor', 'actor_id',
+              'iat', 'nbf', 'exp'
+          )
+          print(json.dumps({key: claims.get(key) for key in keys}, sort_keys=True))
           PY
-          title="GH-R33 OIDC PROPERTY CLAIM $(jq -r '.repo_property_cm_owner_locked_20260730' claims.json)"
-          body="$(jq -c . claims.json)"
-          jq -n --arg title "${title}" --arg body "${body}" \
-            '{title: $title, body: $body}' |
+          )"
+
+            sts_output="${RUNNER_TEMP}/gh-r33-sts.json"
+            sts_error="${RUNNER_TEMP}/gh-r33-sts-error.txt"
+            set +e
+            aws sts assume-role-with-web-identity \
+              --role-arn "${AWS_ROLE_ARN}" \
+              --role-session-name "gh-r33-${GITHUB_RUN_ID}" \
+              --web-identity-token "${jwt}" \
+              --duration-seconds 900 \
+              --output json >"${sts_output}" 2>"${sts_error}"
+            sts_code=$?
+            set -e
+
+            if [[ ${sts_code} -eq 0 ]]; then
+              sts_result="success"
+              export AWS_ACCESS_KEY_ID="$(jq -er '.Credentials.AccessKeyId' "${sts_output}")"
+              export AWS_SECRET_ACCESS_KEY="$(jq -er '.Credentials.SecretAccessKey' "${sts_output}")"
+              export AWS_SESSION_TOKEN="$(jq -er '.Credentials.SessionToken' "${sts_output}")"
+              caller_arn="$(aws sts get-caller-identity --query Arn --output text)"
+              canary_file="${RUNNER_TEMP}/gh-r33-owned-canary.txt"
+              s3_error="${RUNNER_TEMP}/gh-r33-s3-error.txt"
+              set +e
+              aws s3api get-object \
+                --bucket "${AWS_BUCKET}" \
+                --key "${AWS_OBJECT_KEY}" \
+                "${canary_file}" >/dev/null 2>"${s3_error}"
+              s3_code=$?
+              set -e
+              if [[ ${s3_code} -eq 0 ]]; then
+                s3_result="success"
+                canary="$(tr -d '\r\n' <"${canary_file}")"
+                canary_sha256="$(sha256sum "${canary_file}" | cut -d' ' -f1)"
+              else
+                s3_result="failed"
+                error_text="$(head -c 600 "${s3_error}")"
+              fi
+            else
+              sts_result="failed"
+              error_text="$(head -c 600 "${sts_error}")"
+            fi
+          else
+            error_text="$(head -c 600 "${oidc_response}"; head -c 300 "${oidc_error}")"
+          fi
+
+          result="$(jq -nc \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg triggering_actor "${GITHUB_TRIGGERING_ACTOR}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg oidc_http_status "${oidc_status}" \
+            --arg oidc_result "${oidc_result}" \
+            --arg sts_result "${sts_result}" \
+            --arg s3_result "${s3_result}" \
+            --arg caller_arn "${caller_arn}" \
+            --arg canary "${canary}" \
+            --arg canary_sha256 "${canary_sha256}" \
+            --arg error "${error_text}" \
+            --argjson claims "${selected_claims}" \
+            '{actor:$actor,triggering_actor:$triggering_actor,run_id:$run_id,run_attempt:$run_attempt,sha:$sha,oidc_http_status:$oidc_http_status,oidc_result:$oidc_result,sts_result:$sts_result,s3_result:$s3_result,caller_arn:$caller_arn,canary:$canary,canary_sha256:$canary_sha256,error:$error,claims:$claims}')"
+
+          property_value="$(jq -r '.claims.repo_property_cm_owner_locked_20260730 // "absent"' <<<"${result}")"
+          title="GH-R33 AWS ${property_value} OIDC=${oidc_result} STS=${sts_result} S3=${s3_result} run ${GITHUB_RUN_ID}"
+          jq -nc --arg title "${title}" --arg body "${result}" '{title:$title,body:$body}' |
             curl --fail --silent --show-error \
               -X POST \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               "https://api.github.com/repos/${GH_REPOSITORY}/issues" \
-              --data-binary @-
+              --data-binary @- >/dev/null
+
+          if [[ "${s3_result}" != "success" ]]; then
+            exit 1
+          fi
