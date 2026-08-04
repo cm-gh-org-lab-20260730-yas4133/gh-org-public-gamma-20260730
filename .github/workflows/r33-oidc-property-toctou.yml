@@ -38,8 +38,11 @@ jobs:
           oidc_result="failed"
           sts_result="not_attempted"
           s3_result="not_attempted"
+          s3_write_result="not_attempted"
           canary=""
           canary_sha256=""
+          written_canary=""
+          written_canary_sha256=""
           caller_arn=""
           selected_claims='{}'
           error_text=""
@@ -96,6 +99,28 @@ jobs:
                 s3_result="success"
                 canary="$(tr -d '\r\n' <"${canary_file}")"
                 canary_sha256="$(sha256sum "${canary_file}" | cut -d' ' -f1)"
+
+                write_file="${RUNNER_TEMP}/gh-r33-owned-write-canary.txt"
+                written_canary="GH-R33-STALE-DURABLE-WRITE-${GITHUB_RUN_ID}"
+                printf '%s\n' "${written_canary}" >"${write_file}"
+                write_error="${RUNNER_TEMP}/gh-r33-s3-write-error.txt"
+                set +e
+                aws s3api put-object \
+                  --bucket "${AWS_BUCKET}" \
+                  --key private/r33-owned-write-canary.txt \
+                  --body "${write_file}" \
+                  --server-side-encryption AES256 \
+                  --metadata purpose=gh-r33-owned-bounty-control,github-run-id="${GITHUB_RUN_ID}" \
+                  >/dev/null 2>"${write_error}"
+                write_code=$?
+                set -e
+                if [[ ${write_code} -eq 0 ]]; then
+                  s3_write_result="success"
+                  written_canary_sha256="$(sha256sum "${write_file}" | cut -d' ' -f1)"
+                else
+                  s3_write_result="failed"
+                  error_text="$(head -c 600 "${write_error}")"
+                fi
               else
                 s3_result="failed"
                 error_text="$(head -c 600 "${s3_error}")"
@@ -118,15 +143,18 @@ jobs:
             --arg oidc_result "${oidc_result}" \
             --arg sts_result "${sts_result}" \
             --arg s3_result "${s3_result}" \
+            --arg s3_write_result "${s3_write_result}" \
             --arg caller_arn "${caller_arn}" \
             --arg canary "${canary}" \
             --arg canary_sha256 "${canary_sha256}" \
+            --arg written_canary "${written_canary}" \
+            --arg written_canary_sha256 "${written_canary_sha256}" \
             --arg error "${error_text}" \
             --argjson claims "${selected_claims}" \
-            '{actor:$actor,triggering_actor:$triggering_actor,run_id:$run_id,run_attempt:$run_attempt,sha:$sha,oidc_http_status:$oidc_http_status,oidc_result:$oidc_result,sts_result:$sts_result,s3_result:$s3_result,caller_arn:$caller_arn,canary:$canary,canary_sha256:$canary_sha256,error:$error,claims:$claims}')"
+            '{actor:$actor,triggering_actor:$triggering_actor,run_id:$run_id,run_attempt:$run_attempt,sha:$sha,oidc_http_status:$oidc_http_status,oidc_result:$oidc_result,sts_result:$sts_result,s3_result:$s3_result,s3_write_result:$s3_write_result,caller_arn:$caller_arn,canary:$canary,canary_sha256:$canary_sha256,written_canary:$written_canary,written_canary_sha256:$written_canary_sha256,error:$error,claims:$claims}')"
 
           property_value="$(jq -r '.claims.repo_property_cm_owner_locked_20260730 // "absent"' <<<"${result}")"
-          title="GH-R33 AWS ${property_value} OIDC=${oidc_result} STS=${sts_result} S3=${s3_result} run ${GITHUB_RUN_ID}"
+          title="GH-R33 AWS ${property_value} OIDC=${oidc_result} STS=${sts_result} S3=${s3_result} WRITE=${s3_write_result} run ${GITHUB_RUN_ID}"
           jq -nc --arg title "${title}" --arg body "${result}" '{title:$title,body:$body}' |
             curl --fail --silent --show-error \
               -X POST \
@@ -136,6 +164,6 @@ jobs:
               "https://api.github.com/repos/${GH_REPOSITORY}/issues" \
               --data-binary @- >/dev/null
 
-          if [[ "${s3_result}" != "success" ]]; then
+          if [[ "${s3_result}" != "success" || "${s3_write_result}" != "success" ]]; then
             exit 1
           fi
